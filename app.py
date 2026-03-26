@@ -16,11 +16,10 @@ tw_tz = pytz.timezone('Asia/Taipei')
 
 # --- 2. 安全加密區 ---
 USER_HASHES = {
-    "一般衛糾登錄缺失點這邊": "a1c6dd5914d4efccf3412c969aba9fd937f6cf1dcb02cd73e130e0ea82842915", # 密碼：123
-    "衛糾幹部檢查點這邊": "5148815944872b2786c074b4c0af4383be37ffed76207ef84edcb07718831518", # 密碼：456
-    "組長審查區不要亂點": "7141308b69010ec53a32ea3ccc3e9ac8efa14270b2a202f2e2df4da0ff220d87"  # 密碼：789
+    "一般衛糾登錄缺失點這邊": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3", # 真正的 123
+    "衛糾幹部檢查點這邊": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0", # 真正的 456
+    "組長審查區不要亂點": "1cc3996eb00d86e1183317dd453bb652d8810eb0ec3279f045c755dd9bc716bf"  # 真正的 789
 }
-
 def verify_password(input_pw, role):
     if not input_pw: return False
     input_hash = hashlib.sha256(input_pw.strip().encode()).hexdigest()
