@@ -42,9 +42,8 @@ def get_drive_service():
 
 # ⚠️ 注意：請務必將下方的 folder_id 換成你自己的 Google Drive 資料夾 ID ⚠️
 
-
-def upload_to_drive(uploaded_files, folder_id="1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE"):
-# def upload_to_drive(uploaded_files, folder_id="https://drive.google.com/drive/folders/1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE?usp=sharing"):
+# ⚠️ 注意：已經換成你專屬的共用雲端資料夾 ID ⚠️
+def upload_to_drive(uploaded_files, folder_id="1Bz8MX6f1xFE9rb5-AyayCWcsl5Rd2RK9"):
     """上傳圖片並回傳直接顯示連結"""
     if not uploaded_files: return ""
     service = get_drive_service()
@@ -59,7 +58,9 @@ def upload_to_drive(uploaded_files, folder_id="1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE
             }
             uploaded_file.seek(0)
             media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type, resumable=True)
-            file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            
+            # 👇 這裡有加上最重要的 supportsAllDrives=True 魔法指令
+            file = service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
             file_id = file.get('id')
             
             # 使用 thumbnail 連結供 Streamlit 與 Sheets IMAGE 函式使用
