@@ -42,7 +42,10 @@ def get_drive_service():
         return None
 
 # ⚠️ 注意：請務必將下方的 folder_id 換成你自己的 Google Drive 資料夾 ID ⚠️
-def upload_to_drive(uploaded_files, folder_id="https://drive.google.com/drive/folders/1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE?usp=sharing"):
+
+
+def upload_to_drive(uploaded_files, folder_id="1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE"):
+# def upload_to_drive(uploaded_files, folder_id="https://drive.google.com/drive/folders/1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE?usp=sharing"):
     """上傳圖片並回傳直接顯示連結"""
     if not uploaded_files: return ""
     service = get_drive_service()
