@@ -202,7 +202,7 @@ def display_patrol_monitor(df):
 
 # --- UI 頁面設定 ---
 st.set_page_config(page_title="CPYC Shine System", layout="wide")
-st.title("🏫 國立陽明交大附中整潔評分系統")
+st.title("🏫 國立陽明交大附中整潔評分系統2")
 
 role = st.sidebar.radio("請選擇您的身分：", ["班級/導師查閱缺失點這邊", "一般衛糾登錄缺失點這邊", "衛糾幹部檢查點這邊", "組長審查區不要亂點"], index=0)
 
