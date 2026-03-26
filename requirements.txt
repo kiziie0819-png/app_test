@@ -1,0 +1,7 @@
+streamlit
+pandas
+pytz
+Pillow
+st-gsheets-connection
+google-api-python-client
+google-auth

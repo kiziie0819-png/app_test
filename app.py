@@ -1,0 +1,504 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime, timedelta
+import time
+import hashlib
+import io
+import pytz
+from PIL import Image
+from streamlit_gsheets import GSheetsConnection
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google.oauth2 import service_account
+
+# --- 1. 設定台灣時區 ---
+tw_tz = pytz.timezone('Asia/Taipei')
+
+# --- 2. 安全加密區 ---
+USER_HASHES = {
+    "一般衛糾登錄缺失點這邊": "a1c6dd5914d4efccf3412c969aba9fd937f6cf1dcb02cd73e130e0ea82842915", # 密碼：123
+    "衛糾幹部檢查點這邊": "5148815944872b2786c074b4c0af4383be37ffed76207ef84edcb07718831518", # 密碼：456
+    "組長審查區不要亂點": "7141308b69010ec53a32ea3ccc3e9ac8efa14270b2a202f2e2df4da0ff220d87"  # 密碼：789
+}
+
+def verify_password(input_pw, role):
+    if not input_pw: return False
+    input_hash = hashlib.sha256(input_pw.strip().encode()).hexdigest()
+    return input_hash == USER_HASHES.get(role)
+
+# --- 3. Google Drive 圖片處理工具 ---
+def get_drive_service():
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive.file'
+    ]
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            st.secrets["connections"]["gsheets"], scopes=scopes
+        )
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"❌ 憑證讀取錯誤: {e}")
+        return None
+
+# ⚠️ 注意：請務必將下方的 folder_id 換成你自己的 Google Drive 資料夾 ID ⚠️
+def upload_to_drive(uploaded_files, folder_id="https://drive.google.com/drive/folders/1subY-pyRMCk4oerhR3K9hmXKeUgU9mLE?usp=sharing"):
+    """上傳圖片並回傳直接顯示連結"""
+    if not uploaded_files: return ""
+    service = get_drive_service()
+    if not service: return ""
+    
+    links = []
+    try:
+        for uploaded_file in uploaded_files:
+            file_metadata = {
+                'name': f"{datetime.now(tw_tz).strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}",
+                'parents': [folder_id]
+            }
+            uploaded_file.seek(0)
+            media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type, resumable=True)
+            file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            file_id = file.get('id')
+            
+            # 使用 thumbnail 連結供 Streamlit 與 Sheets IMAGE 函式使用
+            thumbnail_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w800"
+            links.append(thumbnail_url)
+            
+        return "|".join(links)
+    except Exception as e:
+        st.error(f"⚠️ 雲端上傳失敗: {e}")
+        return ""
+
+def show_photos(photo_str):
+    if pd.isna(photo_str) or photo_str == "":
+        st.caption("📷 無照片存證")
+        return
+    photos = str(photo_str).split("|")
+    cols = st.columns(min(len(photos), 5)) 
+    for i, url in enumerate(photos):
+        with cols[i % 5]: 
+            st.image(url, use_container_width=True)
+
+# --- 4. 基礎資料與邏輯 ---
+AREA_CODES = {"A": "A棟(行政大樓)", "C": "C棟(實驗大樓)", "D": "D棟(三年級)", "E": "E棟(二年級)", "F": "F棟(工商/一年級)", "G": "圖書館", "H": "中庭", "I": "體育館", "J": "藝能館", "K": "K書中心", "L": "操場", "M": "宿舍"}
+SPOT_CODES = {"甲-男": "廁所", "甲-女": "廁所", "甲-殘": "殘障廁所", "乙": "教室", "丙": "走廊", "戊": "工具間", "庚": "茶水間/蒸飯間", "壬": "平台", "癸": "樓梯", "子": "電梯", "丑": "專科教室", "寅": "辦公室", "卯": "車棚", "辰": "大廳中庭", "未": "馬路", "申": "花圃", "酉": "其他外掃區"}
+FLOOR_LIST = ["無(室外/其他)", "B1樓", "1樓", "2樓", "3樓", "4樓", "5樓", "6樓"]
+CLASS_LIST = [str(i) for i in range(101, 121)] + [str(i) for i in range(201, 221)] + [str(i) for i in range(301, 321)]
+ALL_PATROL_ZONES = [str(i) for i in range(1, 27)] + ["自由幹部"]
+
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+def load_system_config():
+    try:
+        cfg_df = conn.read(worksheet="Config", ttl=0)
+        config = dict(zip(cfg_df['key'], cfg_df['value']))
+        st.session_state.news = config.get('news', "尚未更新活動內容")
+        st.session_state.admin_tip = config.get('admin_tip', "尚未更新組長叮嚀")
+        st.session_state.leader_tip = config.get('leader_tip', "尚未更新幹部提醒")
+        st.session_state.start_date = datetime.strptime(config.get('start_date', '2026-02-23'), '%Y-%m-%d').date()
+    except:
+        if 'news' not in st.session_state: st.session_state.news = "尚未更新活動內容"
+        if 'admin_tip' not in st.session_state: st.session_state.admin_tip = "尚未更新組長叮嚀"
+        if 'leader_tip' not in st.session_state: st.session_state.leader_tip = "尚未更新幹部提醒"
+        if 'start_date' not in st.session_state: st.session_state.start_date = datetime(2026, 2, 23).date()
+
+def save_system_config():
+    config_data = pd.DataFrame([
+        {'key': 'news', 'value': st.session_state.news},
+        {'key': 'admin_tip', 'value': st.session_state.admin_tip},
+        {'key': 'leader_tip', 'value': st.session_state.leader_tip},
+        {'key': 'start_date', 'value': st.session_state.start_date.strftime('%Y-%m-%d')}
+    ])
+    try:
+        conn.update(worksheet="Config", data=config_data)
+    except Exception as e: 
+        st.error(f"❌ 儲存失敗：{e}")
+
+load_system_config()
+
+def get_week_number(target_date, start_date):
+    monday_of_start_week = start_date - timedelta(days=start_date.weekday())
+    monday_of_target_week = target_date - timedelta(days=target_date.weekday())
+    delta_days = (monday_of_target_week - monday_of_start_week).days
+    return max(1, (delta_days // 7) + 1)
+
+def calculate_leader_stats(df, is_term=False, base_score=100):
+    if df.empty:
+        empty_dfs = []
+        for grade in ["1", "2", "3"]:
+            empty_dfs.append(pd.DataFrame({"排名": range(1, 21), "班級": [f"{grade}{i:02}" for i in range(1, 21)], "分數": [base_score]*20}))
+        return empty_dfs
+        
+    df["班級"] = df["班級"].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df_grouped = df.groupby(["班級", "週次"])["總扣分"].sum().reset_index()
+    df_grouped["週得分"] = base_score - df_grouped["總扣分"]
+    full_classes = pd.DataFrame({"班級": CLASS_LIST})
+    full_classes["班級"] = full_classes["班級"].astype(str).str.strip()
+    
+    if is_term:
+        total_recorded_weeks = df["週次"].nunique()
+        total_recorded_weeks = max(total_recorded_weeks, 1)
+        term_stat = df_grouped.groupby("班級")["週得分"].sum().reset_index()
+        final_stat = pd.merge(full_classes, term_stat, on="班級", how="left").fillna({"週得分": 100 * total_recorded_weeks})
+        recorded_week_counts = df_grouped.groupby("班級")["週次"].count().reset_index().rename(columns={"週次": "有紀錄週數"})
+        final_stat = pd.merge(final_stat, recorded_week_counts, on="班級", how="left").fillna({"有紀錄週數": 0})
+        final_stat["學期平均分數"] = (final_stat["週得分"] + (total_recorded_weeks - final_stat["有紀錄週數"]) * 100) / total_recorded_weeks
+        final_stat["學期平均分數"] = final_stat["學期平均分數"].round(2)
+        sort_col = "學期平均分數"
+    else:
+        week_stat = df_grouped.groupby("班級")["週得分"].sum().reset_index()
+        final_stat = pd.merge(full_classes, week_stat, on="班級", how="left").fillna({"週得分": 100})
+        final_stat = final_stat.rename(columns={"週得分": "分數"})
+        sort_col = "分數"
+        
+    final_stat["年級"] = final_stat["班級"].str[0]
+    ranked_dfs = []
+    for grade in ["1", "2", "3"]:
+        g_df = final_stat[final_stat["年級"] == grade].copy()
+        g_df = g_df.sort_values(by=[sort_col, "班級"], ascending=[False, True])
+        g_df.insert(0, "排名", range(1, len(g_df) + 1))
+        if not is_term: g_df["分數"] = g_df["分數"].astype(int)
+        ranked_dfs.append(g_df[["排名", "班級", sort_col]])
+    return ranked_dfs
+
+def display_patrol_monitor(df):
+    st.subheader("📌 今日巡區填單進度即時監控")
+    try:
+        now_tw = datetime.now(tw_tz)
+        today_date = now_tw.date()
+        if df.empty:
+            st.info("目前尚無填單紀錄")
+            return
+        
+        # 轉換日期格式以便比較
+        df_copy = df.copy()
+        df_copy["日期時間"] = pd.to_datetime(df_copy["日期時間"], errors='coerce')
+        today_df = df_copy[df_copy["日期時間"].dt.date == today_date].copy()
+        
+        today_df["巡區"] = today_df["巡區"].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        today_df["班級"] = today_df["班級"].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        done_dict = dict(zip(today_df["巡區"], today_df["班級"]))
+        
+        cols = st.columns(6)
+        for i in range(1, 27):
+            zone_no = str(i)
+            with cols[(i-1) % 6]:
+                if zone_no in done_dict:
+                    st.markdown(f"""<div style="background-color:#d4edda; border:1px solid #c3e6cb; border-radius:5px; padding:5px; text-align:center; margin-bottom:5px;">
+                        <span style="color:#155724; font-weight:bold;">#{zone_no}</span><br>
+                        <span style="color:#155724; font-size:0.8em;">{done_dict[zone_no]}</span>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""<div style="background-color:#f8d7da; border:1px solid #f5c6cb; border-radius:5px; padding:5px; text-align:center; margin-bottom:5px;">
+                        <span style="color:#721c24; font-weight:bold;">#{zone_no}</span><br>
+                        <span style="color:#721c24; font-size:0.8em;">未填</span>
+                    </div>""", unsafe_allow_html=True)
+        st.divider()
+    except Exception as e: 
+        st.warning(f"監控模組讀取中... ({e})")
+
+# --- UI 頁面設定 ---
+st.set_page_config(page_title="CPYC Shine System", layout="wide")
+st.title("🏫 國立陽明交大附中整潔評分系統")
+
+role = st.sidebar.radio("請選擇您的身分：", ["班級/導師查閱缺失點這邊", "一般衛糾登錄缺失點這邊", "衛糾幹部檢查點這邊", "組長審查區不要亂點"], index=0)
+
+# ==========================================
+# --- A. 班級/導師查閱 ---
+# ==========================================
+if role == "班級/導師查閱缺失點這邊":
+    st.header("📊 全校整潔比賽即時報報")
+    c1, c2 = st.columns(2)
+    c1.info(f"📅 **近期重大活動**\n\n{st.session_state.news}")
+    c2.success(f"📢 **組長小叮嚀**\n\n{st.session_state.admin_tip}")
+    st.divider()
+    
+    try:
+        raw_df = conn.read(worksheet="Sheet1", ttl=0)
+        raw_df["日期時間"] = pd.to_datetime(raw_df["日期時間"], errors='coerce')
+        raw_df = raw_df.dropna(subset=['日期時間']).copy()
+        raw_df["週次"] = raw_df["日期時間"].apply(lambda x: get_week_number(x.date(), st.session_state.start_date))
+        current_week = get_week_number(datetime.now(tw_tz).date(), st.session_state.start_date)
+    except: 
+        raw_df = pd.DataFrame()
+        current_week = 1
+    
+    st.subheader("🏆 即時整潔排名")
+    view_week_str = st.selectbox("請選擇查詢週次：", [f"第 {w} 週" for w in range(current_week, 0, -1)])
+    sel_w_num = int(view_week_str.split(" ")[1])
+    
+    if not raw_df.empty:
+        raw_df["審核狀態"] = raw_df["審核狀態"].astype(str).str.strip()
+        week_pass_df = raw_df[(raw_df["週次"] == sel_w_num) & (raw_df["審核狀態"] == "審核通過")]
+        instant_ranks = calculate_leader_stats(week_pass_df, is_term=False)
+    else: 
+        instant_ranks = calculate_leader_stats(pd.DataFrame())
+        
+    col_r1, col_r2, col_r3 = st.columns(3)
+    titles = ["🥇 一年級", "🥈 二年級", "🥉 三年級"]
+    for i, col in enumerate([col_r1, col_r2, col_r3]):
+        with col:
+            st.markdown(f"#### {titles[i]}")
+            st.table(instant_ranks[i]) 
+            
+    st.divider()
+    st.subheader("🔍 各班缺失明細查詢")
+    c_sel, w_sel = st.columns(2)
+    search_class = c_sel.selectbox("請選擇您的班級", ["請選擇"] + CLASS_LIST, key="search_box")
+    selected_week_detail = w_sel.selectbox("請選擇明細週次", [f"第 {w} 週" for w in range(current_week, 0, -1)])
+    
+    if search_class != "請選擇":
+        det_w = int(selected_week_detail.split(" ")[1])
+        raw_df["班級"] = raw_df["班級"].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        class_res = raw_df[(raw_df["班級"] == search_class) & (raw_df["週次"] == det_w)].sort_values(by="日期時間", ascending=False)
+        
+        if not class_res.empty:
+            for _, row in class_res.iterrows():
+                is_admin = "🛡️ 組長特別" in str(row['缺失項目清單'])
+                score_label = "今日加分" if row['總扣分'] < 0 else "今日扣分"
+                display_score = abs(int(row['總扣分']))
+                bg_color = "style='background-color: #fdf2f2; padding: 10px; border-radius: 5px; border-left: 5px solid #ff4b4b;'" if is_admin else ""
+                
+                with st.expander(f"📅 {row['日期時間'].strftime('%Y-%m-%d %H:%M')} | 地點：{row['地點(含樓層)']}"):
+                    st.markdown(f"<div {bg_color}><b>內容：</b> {row['缺失項目清單']} <br> <b>{score_label}：</b> {display_score} <br> <b>狀態：</b> {row['審核狀態']}</div>", unsafe_allow_html=True)
+                    show_photos(row.get("照片網址", ""))
+        else: 
+            st.success(f"🌟 班級 {search_class} 在該週次無缺失紀錄。")
+
+# ==========================================
+# --- B. 一般衛糾登錄 ---
+# ==========================================
+elif role == "一般衛糾登錄缺失點這邊":
+    st.sidebar.divider()
+    input_pw = st.sidebar.text_input("請輸入一般衛糾密碼", type="password")
+    if verify_password(input_pw, role):
+        st.info(f"📅 叮嚀：{st.session_state.admin_tip} | 💡 幹部提醒：{st.session_state.leader_tip}")
+        st.subheader("📋 缺失紀錄登錄")
+        
+        now_tw = datetime.now(tw_tz)
+        col_date, col_pid = st.columns([1, 1])
+        with col_date: 
+            report_date = st.date_input("📅 補單日期", value=now_tw.date())
+        with col_pid: 
+            p_id = st.selectbox("巡區編號 (必填)", ALL_PATROL_ZONES)
+            
+        c_a, c_f, c_s = st.columns(3)
+        area_k = c_a.selectbox("區域", list(AREA_CODES.keys()), format_func=lambda x: f"{x}-{AREA_CODES[x]}")
+        floor = c_f.selectbox("樓層", FLOOR_LIST)
+        spot_k = c_s.selectbox("位置", list(SPOT_CODES.keys()), format_func=lambda x: f"{x}-{SPOT_CODES[x]}")
+        target_class = st.selectbox("巡視班級", ["請選擇"] + CLASS_LIST)
+        
+        # 項目選擇 (排版整理)
+        toilet_items = [
+            "201 小便斗不乾淨", "202 大便池不乾淨", "203 洗手台不乾淨", "204 鏡子不明亮", 
+            "205 垃圾桶不乾淨", "2061 未補充衛生紙", "2062 未補充香皂", "2071 紙匣不乾淨", 
+            "2072 皂架不乾淨", "2073 感應器不乾淨", "2074 沖水器不乾淨", "5011 拖把槽入水孔不淨", 
+            "5012 拖把槽下方不淨", "502 地面未刷洗", "503 地面太濕", "504 隔間內地板髒", 
+            "701 垃圾未倒", "703 廁所門反鎖"
+        ]
+        area_items = [
+            "211 地面不乾淨", "212 地面未拖", "213 地面太濕", "215 灰塵堆積", "2161 窗台(內)髒", 
+            "2162 窗台(走道)髒", "218 扶手欄杆髒", "222 教室門板髒", "5101 黑板不乾淨", 
+            "5102 板溝不乾淨", "5111 講台桌髒", "5112 講台地髒", "5113 講台雜物", "5141 蜘蛛網(牆壁)", 
+            "5142 蜘蛛網(天花板)", "5151 玻璃(內側)", "5152 玻璃(走道側)", "5153 玻璃(門)", 
+            "518 飲水機不潔", "524 走廊堆放雜物"
+        ]
+        trash_items = [
+            "219 工具擺放不整齊", "220 回送桶放室外", "221 洗手槽廚餘未清", "512 掃具未貼標籤", 
+            "5161 垃圾箱外殼", "5162 垃圾箱內部", "5163 垃圾箱四格未齊", "523 垃圾箱內未放桶", 
+            "704 掃具隨意放置", "705 工具間髒亂", "1000 垃圾桶未倒", "1001 垃圾桶過過多未倒", 
+            "1002 紙類回收未倒", "1003 垃圾任意放置"
+        ]
+        violation_items = [
+            "520 打掃遲到", "1004 沒打掃", "1005 嬉戲打球", "1006 態度不佳", 
+            "1007 惡意丟棄垃圾", "1008 玩手機(累計制)"
+        ]
+        
+        all_selected = (
+            st.multiselect("🚽 廁所", toilet_items) + 
+            st.multiselect("掃區域", area_items) + 
+            st.multiselect("♻️ 掃具與垃圾", trash_items) + 
+            st.multiselect("⚠️ 重大違規", violation_items)
+        )
+        
+        extra_late = ""
+        extra_phone = 1
+        
+        if any("520" in i for i in all_selected): 
+            extra_late = st.text_input("🕒 遲到時間")
+        if any("1008" in i for i in all_selected): 
+            extra_phone = st.number_input("📱 玩手機人數", min_value=1, step=1)
+            
+        is_change_time = st.checkbox("📢 班級更換時間")
+        user_note = st.text_area("📝 其他備註")
+        uploaded_photos = st.file_uploader("📸 存證照片", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+        
+        if st.button("🚀 提交回報單"):
+            if target_class != "請選擇" and (all_selected or user_note):
+                with st.spinner("雲端上傳中，請稍候..."):
+                    # 重新抓取按下瞬間的時間
+                    current_time_now = datetime.now(tw_tz)
+                    final_dt_str = datetime.combine(report_date, current_time_now.time()).strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # 1. 執行 Drive 上傳
+                    drive_links = upload_to_drive(uploaded_photos)
+                    
+                    # 2. 準備公式 (確保縮圖顯示)
+                    first_url = drive_links.split("|")[0] if drive_links else ""
+                    image_formula = f'=IMAGE("{first_url}")' if first_url else ""
+
+                    # 3. 分數計算
+                    f_list = []
+                    n_score = 0
+                    p_score = 0
+                    for item in all_selected:
+                        code = item.split(' ')[0]
+                        # 邏輯維持
+                        weight = 2 if code.startswith("2") else 5 if code.startswith("5") else 7 if code.startswith("7") else 10 if code.startswith("10") else 0
+                        
+                        if code == "1008": 
+                            f_list.append(f"{item} ({extra_phone}人)")
+                            p_score += (1 * extra_phone)
+                        elif code == "520": 
+                            f_list.append(f"{item} ({extra_late})")
+                            n_score += weight
+                        else: 
+                            f_list.append(item)
+                            n_score += weight
+                            
+                    if user_note: 
+                        f_list.append(f"備註: {user_note}")
+                        
+                    total_score = p_score if is_change_time else (n_score + p_score)
+                    
+                    # 4. 寫入 Sheets
+                    try:
+                        df = conn.read(worksheet="Sheet1", ttl=0)
+                        new_row = {
+                            "日期時間": final_dt_str, "巡區": str(p_id), "地點(含樓層)": f"{AREA_CODES[area_k]}-{floor}-{SPOT_CODES[spot_k]}", 
+                            "班級": str(target_class), "缺失項目清單": ", ".join(f_list), "總扣分": int(total_score), 
+                            "照片網址": drive_links, "試算表預覽": image_formula, "審核狀態": "待審核"
+                        }
+                        new_df = pd.DataFrame([new_row])
+                        updated_df = pd.concat([df, new_df], ignore_index=True)
+                        conn.update(worksheet="Sheet1", data=updated_df)
+                        
+                        st.success("✅ 提交成功！")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ 寫入失敗: {e}")
+
+# ==========================================
+# --- C. 幹部檢查 ---
+# ==========================================
+elif role == "衛糾幹部檢查點這邊":
+    st.sidebar.divider()
+    input_pw = st.sidebar.text_input("請輸入幹部密碼", type="password")
+    if verify_password(input_pw, role):
+        st.header("🕵️ 幹部檢查區")
+        try:
+            main_df = conn.read(worksheet="Sheet1", ttl=0)
+            display_patrol_monitor(main_df)
+            pending_df = main_df[main_df["審核狀態"] == "待審核"]
+            
+            if not pending_df.empty:
+                st.subheader("📋 待處理缺失單")
+                st.dataframe(pending_df, use_container_width=True)
+                sel_id = st.selectbox("選擇處理 ID", pending_df.index)
+                target = pending_df.loc[sel_id]
+                show_photos(target.get("照片網址", ""))
+                audit_note = st.text_input("退單理由")
+                
+                c1, c2 = st.columns(2)
+                if c1.button("✅ 核准通過"):
+                    main_df.at[sel_id, "審核狀態"] = "審核通過"
+                    conn.update(worksheet="Sheet1", data=main_df)
+                    st.success("已通過")
+                    st.rerun()
+                if c2.button("❌ 執行退回") and audit_note:
+                    main_df.at[sel_id, "審核狀態"] = f"退回：{audit_note}"
+                    conn.update(worksheet="Sheet1", data=main_df)
+                    st.warning("已退回")
+                    st.rerun()
+            else: 
+                st.success("目前無待審核單")
+        except: 
+            st.error("讀取失敗")
+
+# ==========================================
+# --- D. 組長最高管理中心 ---
+# ==========================================
+elif role == "組長審查區不要亂點":
+    st.sidebar.divider()
+    input_pw = st.sidebar.text_input("請輸入管理員密碼", type="password")
+    if verify_password(input_pw, role):
+        st.header("⚡ 組長最高管理中心")
+        try:
+            full_df = conn.read(worksheet="Sheet1", ttl=0)
+            display_patrol_monitor(full_df)
+        except: 
+            full_df = pd.DataFrame()
+            
+        t1, t2, t5, t3, t4 = st.tabs(["📢 公告管理", "🕵️ 審查監控", "➕ 額外加/扣分中心", "📅 各週成績結算", "📈 學期成績結算"])
+        
+        with t1:
+            st.session_state.news = st.text_area("活動內容", st.session_state.news)
+            st.session_state.admin_tip = st.text_area("組長叮嚀", st.session_state.admin_tip)
+            if st.button("更新公告"): 
+                save_system_config()
+                st.success("公告已更新")
+                
+            st.session_state.start_date = st.date_input("開學日", st.session_state.start_date)
+            if st.button("更新日期"): 
+                save_system_config()
+                st.success("日期已更新")
+                
+        with t2:
+            st.dataframe(full_df, use_container_width=True)
+            if not full_df.empty:
+                idx = st.selectbox("查看詳細照片 (選擇索引)", full_df.index)
+                show_photos(full_df.loc[idx, "照片網址"])
+                
+        with t5:
+            now_tw = datetime.now(tw_tz)
+            ac_class = st.selectbox("獎懲班級", CLASS_LIST)
+            ac_mode = st.radio("類型", ["獎勵 (加分)", "違規 (扣分)"], horizontal=True)
+            ac_reason = st.text_input("獎懲原因")
+            ac_point = st.selectbox("分數", [2, 5, 7, 10])
+            final_p = -ac_point if "獎勵" in ac_mode else ac_point
+            ac_photos = st.file_uploader("證明照片", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+            
+            if st.button("確認提交"):
+                with st.spinner("上傳中..."):
+                    d_links = upload_to_drive(ac_photos)
+                    image_f = f'=IMAGE("{d_links.split("|")[0]}")' if d_links else ""
+                    new_row = {
+                        "日期時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), 
+                        "巡區": "行政", "地點(含樓層)": "組長室", "班級": str(ac_class), 
+                        "缺失項目清單": f"🛡️ 組長特別: {ac_reason}", "總扣分": int(final_p), 
+                        "照片網址": d_links, "試算表預覽": image_f, "審核狀態": "審核通過"
+                    }
+                    conn.update(worksheet="Sheet1", data=pd.concat([full_df, pd.DataFrame([new_row])], ignore_index=True))
+                    st.success("提交成功")
+                    st.rerun()
+                    
+        with t3:
+            if not full_df.empty:
+                full_df["日期時間"] = pd.to_datetime(full_df["日期時間"], errors='coerce')
+                valid_df = full_df.dropna(subset=['日期時間']).copy()
+                valid_df["週次"] = valid_df["日期時間"].apply(lambda x: get_week_number(x.date(), st.session_state.start_date))
+                sel_w = st.selectbox("結算週次", range(get_week_number(datetime.now(tw_tz).date(), st.session_state.start_date), 0, -1))
+                week_ranks = calculate_leader_stats(valid_df[(valid_df["週次"] == sel_w) & (valid_df["審核狀態"] == "審核通過")])
+                for i in range(3): 
+                    st.markdown(f"#### 第 {i+1} 年級")
+                    st.dataframe(week_ranks[i], hide_index=True)
+                    
+        with t4:
+            term_ranks = calculate_leader_stats(full_df[full_df["審核狀態"] == "審核通過"], is_term=True)
+            for i in range(3): 
+                st.markdown(f"#### 第 {i+1} 年級")
+                st.dataframe(term_ranks[i], hide_index=True)
+
+st.sidebar.markdown("---")
+st.sidebar.caption("© 2026 CPYC 管理系統 v5.1")
